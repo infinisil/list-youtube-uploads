@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -eu
+set -o pipefail
+
+if [[ "$#" -eq 0 ]]; then
+  echo "Usage: ./uploads URL" >&2
+  exit 1
+fi
+channelUrl=$1
+
+apiKeyFile=${XDG_DATA_HOME:-~/.local/share}/list-youtube-uploads/key
+if [[ ! -f "$apiKeyFile" ]]; then
+  mkdir -p "$(dirname "$apiKeyFile")"
+  echo "No YouTube API Key found. Generate one on https://console.developers.google.com/apis/api/youtube.googleapis.com/credentials, then write it to $apiKeyFile" >&2
+  exit 1
+fi
+apiKey=$(cat "$apiKeyFile")
+
+echo -n "Channel ID for Channel url $channelUrl is.. " >&2
+
+if ! channelId=$(curl -sSf "$channelUrl" | sed -n 's/.*"externalId":"\([^"]*\)".*/\1/p'); then
+  echo >&2
+  echo "Unable to find channel id for channel url $channelUrl" >&2
+  exit 1
+fi
+
+echo "$channelId" >&2
+
+echo -n "Upload playlist ID for channel ID $channelId is.. " >&2
+
+channelData=$(curl -G --silent --show-error \
+  https://www.googleapis.com/youtube/v3/channels \
+  --data-urlencode key="$apiKey" \
+  --data-urlencode id="$channelId" \
+  --data-urlencode part=contentDetails)
+
+if ! uploadsId=$(jq -re '.items[0].contentDetails.relatedPlaylists.uploads' 2>/dev/null <<< "$channelData"); then
+  echo >&2
+  echo "Could not find uploads for channel $channel: $channelData" >&2
+  exit 1
+fi
+
+echo "$uploadsId" >&2
+
+echo "Listing all videos.." >&2
+
+count=0
+pageToken=
+while true; do
+  output=$(curl -G --silent --show-error \
+    https://www.googleapis.com/youtube/v3/playlistItems \
+    --data-urlencode key="$apiKey" \
+    --data-urlencode playlistId="$uploadsId" \
+    --data-urlencode part=contentDetails \
+    --data-urlencode maxResults=50 \
+    --data-urlencode pageToken="$pageToken")
+  
+  if ! jq -re '.items[].contentDetails.videoId | "https://youtube.com/watch?v=\(.)"' 2>/dev/null <<< "$output"; then
+    echo "Could not extract video ids from response: $output" >&2
+    exit 1
+  fi
+
+  addedCount=$(jq -re '.items | length' <<< "$output")
+  count=$(( count + addedCount ))
+  totalCount=$(jq -re '.pageInfo.totalResults' <<< "$output")
+  echo "Listed $count / $totalCount" >&2
+
+  if ! pageToken=$(jq -re '.nextPageToken' <<< "$output"); then
+    echo "All videos listed" >&2
+    exit 0
+  fi
+done
